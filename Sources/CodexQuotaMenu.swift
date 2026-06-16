@@ -781,6 +781,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let reader = QuotaReader()
     private let cache = SnapshotCache()
     private let formatter = StatusFormatter()
+    private let refreshInterval: TimeInterval = 10
     private let refreshQueue = DispatchQueue(label: "local.codex-quota-menubar.refresh", qos: .utility)
     private var statusItem: NSStatusItem?
     private var statusView: QuotaStatusView?
@@ -800,7 +801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applySnapshot(cache.load())
         requestRefresh()
 
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             self?.requestRefresh()
         }
     }
