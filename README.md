@@ -23,16 +23,55 @@
 ## 系统要求
 
 - macOS 13 或更高版本
-- Xcode Command Line Tools，用于提供 `swiftc`
 - 本机已使用过 Codex，并且存在 `~/.codex/sessions` 会话日志
+
+只有从源码构建时才需要 Xcode Command Line Tools。
+
+## 下载方式（推荐）
+
+### 方式一：下载 app 压缩包
+
+打开 [Releases](https://github.com/peb44043399-web/codex-usage-mac-menubar/releases/latest)，下载：
+
+```text
+CodexUsageMacMenubar.app.zip
+```
+
+解压后可以直接运行 app。首次运行时，如果 macOS 提示来自未认证开发者，需要在
+“系统设置 -> 隐私与安全性”里允许打开，或右键 app 后选择“打开”。
+
+这种方式只负责运行 app；如果需要登录后自动启动，使用下面的一行安装方式。
+
+### 方式二：一行安装并配置开机启动
+
+这条命令会下载最新 Release，把 app 安装到 `~/Applications`，生成 LaunchAgent，
+并立即启动菜单栏应用：
+
+```zsh
+curl -fsSL https://raw.githubusercontent.com/peb44043399-web/codex-usage-mac-menubar/main/scripts/install-release.sh | zsh
+```
+
+如果要先查看脚本内容，打开：
+
+```text
+https://raw.githubusercontent.com/peb44043399-web/codex-usage-mac-menubar/main/scripts/install-release.sh
+```
+
+卸载一行安装版本：
+
+```zsh
+curl -fsSL https://raw.githubusercontent.com/peb44043399-web/codex-usage-mac-menubar/main/scripts/uninstall-release.sh | zsh
+```
+
+## 从源码构建
+
+源码构建需要 Xcode Command Line Tools，用于提供 `swiftc`。
 
 如果没有 `swiftc`，先安装 Xcode Command Line Tools：
 
 ```zsh
 xcode-select --install
 ```
-
-## 快速开始
 
 克隆仓库、构建应用，然后安装为 LaunchAgent：
 
@@ -93,6 +132,8 @@ weekly刷新时间: 2026/6/18, 10:43:30
 ```
 
 ## 安装、重启、卸载
+
+这一节适用于从源码构建后安装的场景。
 
 安装或重启 LaunchAgent：
 
