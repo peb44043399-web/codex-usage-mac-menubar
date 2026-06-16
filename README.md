@@ -1,82 +1,88 @@
-# Codex Quota Menu
+# Codex Usage Mac Menubar
 
-macOS menu bar app for showing your local Codex quota at a glance.
+一个 macOS 菜单栏应用，用来随时查看本机 Codex 的剩余额度。
 
-It displays two remaining-usage values in the status bar:
+状态栏显示两行剩余用量：
 
-- `5h`: remaining quota in the rolling 5-hour window
-- `w`: remaining quota in the weekly window
+- `5h`：5 小时滚动窗口的剩余额度
+- `w`：周额度的剩余额度
 
-The app reads Codex's local session logs. It does not call OpenAI APIs and does
-not read `~/.codex/auth.json`.
+它只读取本机 Codex 会话日志，不调用 OpenAI API，也不读取
+`~/.codex/auth.json`。
 
-![Codex Quota Menu screenshot](docs/screenshot.png)
+![Codex Usage Mac Menubar 截图](docs/screenshot.png)
 
-## Requirements
+## 功能
 
-- macOS 13 or later
-- Xcode Command Line Tools, for `swiftc`
-- A local Codex installation that writes session logs under `~/.codex/sessions`
+- 在 macOS 状态栏显示 Codex 5 小时额度和周额度
+- 点击后显示剩余额度、刷新时间和刷新按钮
+- 登录 macOS 后自动启动
+- 本地解析日志，不发起网络请求
+- 启动时使用本地缓存先显示上次结果，再后台刷新
 
-Install Xcode Command Line Tools if `swiftc` is not available:
+## 系统要求
+
+- macOS 13 或更高版本
+- Xcode Command Line Tools，用于提供 `swiftc`
+- 本机已使用过 Codex，并且存在 `~/.codex/sessions` 会话日志
+
+如果没有 `swiftc`，先安装 Xcode Command Line Tools：
 
 ```zsh
 xcode-select --install
 ```
 
-## Quick Start
+## 快速开始
 
-Clone the repository, build the app, then install it as a LaunchAgent:
+克隆仓库、构建应用，然后安装为 LaunchAgent：
 
 ```zsh
-git clone https://github.com/peb44043399-web/codex-quota-menubar.git
-cd codex-quota-menubar
+git clone https://github.com/peb44043399-web/codex-usage-mac-menubar.git
+cd codex-usage-mac-menubar
 scripts/build.sh
 scripts/install-launch-agent.sh
 ```
 
-After installation, the app starts immediately and also starts automatically at
-login.
+安装后应用会立即启动，并在下次登录 macOS 时自动启动。
 
-Important: the LaunchAgent points to the app inside this clone directory. Do not
-move or delete the repository directory after installing, unless you uninstall
-and install again from the new location.
+注意：LaunchAgent 会指向当前仓库目录里的 app。如果安装后移动或删除这个
+仓库目录，开机启动会失效。需要移动目录时，请先卸载，再从新位置重新安装。
 
-## Usage
+## 使用说明
 
-The menu bar item shows two rows:
+菜单栏会显示两行：
 
 ```text
 5h 68%
 w  21%
 ```
 
-Both values are remaining quota, not used quota.
+这两个百分比都是剩余额度，不是已用额度。
 
-Click the menu bar item to open the detail menu. The detail menu shows:
+点击菜单栏图标后会打开详情菜单，里面显示：
 
-- 5-hour remaining quota and refresh time
-- weekly remaining quota and refresh date
-- refresh action
-- quit action
+- 5 小时剩余额度和刷新时间
+- 周剩余额度和刷新日期
+- 手动刷新
+- 退出
 
-Hold Option while opening the menu to reveal the source log action.
+按住 Option 再打开菜单，可以显示源日志入口，用于排查当前额度来自哪个日志文件。
 
-## Test Without Installing
+## 不安装时测试解析结果
 
-Build first:
+先构建：
 
 ```zsh
 scripts/build.sh
 ```
 
-Then run the parser once:
+然后运行一次解析：
 
 ```zsh
 dist/CodexQuotaMenu.app/Contents/MacOS/CodexQuotaMenu --print-once
 ```
 
-Example output:
+示例输出：
 
 ```text
 Codex 5h 68% w 21%
@@ -86,105 +92,109 @@ Codex 5h 68% w 21%
 weekly刷新时间: 2026/6/18, 10:43:30
 ```
 
-## Install, Restart, Uninstall
+## 安装、重启、卸载
 
-Install or restart the LaunchAgent:
+安装或重启 LaunchAgent：
 
 ```zsh
 scripts/install-launch-agent.sh
 ```
 
-Uninstall:
+卸载：
 
 ```zsh
 scripts/uninstall-launch-agent.sh
 ```
 
-Check whether the LaunchAgent is running:
+检查 LaunchAgent 是否正在运行：
 
 ```zsh
 launchctl print "gui/$(id -u)/com.local.codex-quota-menubar"
 ```
 
-Logs:
+查看错误日志：
 
 ```zsh
 tail -n 80 /tmp/codex-quota-menubar.err.log
 ```
 
-## Configuration
+## 配置
 
-The app reads these environment variables:
+应用读取以下环境变量：
 
-| Variable | Default | Meaning |
+| 变量 | 默认值 | 含义 |
 | --- | --- | --- |
-| `CODEX_HOME` | `~/.codex` | Codex home directory |
-| `CODEX_LIMIT_ID` | `codex` | Rate-limit id to prefer |
-| `CODEX_QUOTA_LOOKBACK_DAYS` | `3` | Recent session days to scan before fallback |
+| `CODEX_HOME` | `~/.codex` | Codex 主目录 |
+| `CODEX_LIMIT_ID` | `codex` | 优先读取的 rate-limit id |
+| `CODEX_QUOTA_LOOKBACK_DAYS` | `3` | 优先扫描最近几天的 session 日志 |
 
-The install script writes `CODEX_HOME` and `CODEX_LIMIT_ID` into the generated
-LaunchAgent plist. If you need different values, edit
-`scripts/install-launch-agent.sh`, then run it again.
+安装脚本会把 `CODEX_HOME` 和 `CODEX_LIMIT_ID` 写入生成的 LaunchAgent plist。
+如果要修改这些值，请编辑 `scripts/install-launch-agent.sh`，然后重新运行安装脚本。
 
-## How It Works
+## 工作原理
 
-The app scans local JSONL files under:
+应用会扫描以下本地 JSONL 文件：
 
 ```text
 ~/.codex/sessions
 ~/.codex/archived_sessions
 ```
 
-It finds the newest event containing a `rate_limits` field, extracts the 5-hour
-and weekly windows, and renders the remaining percentages in the macOS status
-bar.
+它会寻找最新的 `rate_limits` 事件，提取 5 小时窗口和周窗口，然后把剩余百分比
+渲染到 macOS 状态栏。
 
-For startup responsiveness, the app caches the last parsed snapshot in:
+为了提升启动速度，应用会缓存上一次解析到的额度快照：
 
 ```text
 ~/Library/Caches/local.codex.quota-menubar/last-snapshot.json
 ```
 
-The cache is only a local copy of the last quota snapshot. It does not contain
-Codex credentials.
+这个缓存只包含最近一次额度快照，不包含 Codex 凭据。
 
-## Troubleshooting
+## 常见问题
 
-If the menu shows `--`, the app did not find a local `rate_limits` event. Use
-Codex once, or open Codex status in a session, then click refresh.
+### 状态栏显示 `--`
 
-If the app does not appear after login, run:
+这通常表示本地日志里还没有找到 `rate_limits` 事件。先使用一次 Codex，或在
+Codex 会话里查看状态，然后点击菜单里的刷新。
+
+### 登录后没有自动启动
+
+重新安装 LaunchAgent 并检查状态：
 
 ```zsh
 scripts/install-launch-agent.sh
 launchctl print "gui/$(id -u)/com.local.codex-quota-menubar"
 ```
 
-If you moved the repository directory after installing, uninstall and reinstall:
+### 移动仓库目录后无法启动
+
+LaunchAgent 记录的是安装时的 app 路径。移动目录后需要重新安装：
 
 ```zsh
 scripts/uninstall-launch-agent.sh
 scripts/install-launch-agent.sh
 ```
 
-If build fails with `swiftc: command not found`, install Xcode Command Line
-Tools:
+### 构建时报 `swiftc: command not found`
+
+安装 Xcode Command Line Tools：
 
 ```zsh
 xcode-select --install
 ```
 
-## Privacy
+## 隐私
 
-This app is local-only:
+这个应用只在本机工作：
 
-- no network requests
-- no OpenAI API calls
-- no reading of `~/.codex/auth.json`
-- no telemetry
+- 不发起网络请求
+- 不调用 OpenAI API
+- 不读取 `~/.codex/auth.json`
+- 不做遥测
 
-It reads local Codex session JSONL files only to find quota metadata.
+它只读取本机 Codex session JSONL 文件中的额度元数据。
 
-## License
+## 许可证
 
 MIT
