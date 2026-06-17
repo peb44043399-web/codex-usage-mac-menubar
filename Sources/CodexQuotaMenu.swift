@@ -40,12 +40,23 @@ struct FileCandidate {
     let modifiedAt: Date
 }
 
+struct FileScanResult {
+    let preferred: QuotaSnapshot?
+    let fallback: QuotaSnapshot?
+
+    var displaySnapshot: QuotaSnapshot? {
+        preferred ?? fallback
+    }
+}
+
 final class QuotaReader {
     private let fileManager = FileManager.default
     private let codexHome: URL
     private let preferredLimitId: String
     private let lookbackDays: Int
     private let isoFormatter: ISO8601DateFormatter
+    private let scanChunkBytes: UInt64 = 1024 * 1024
+    private let rateLimitsNeedle = Data(#""rate_limits""#.utf8)
 
     init(codexHome: URL? = nil) {
         if let override = ProcessInfo.processInfo.environment["CODEX_HOME"], !override.isEmpty {
@@ -99,7 +110,7 @@ final class QuotaReader {
             lines.append("\(name) candidates \(files.count)")
 
             for file in files {
-                let snapshot = scanTail(of: file.url)
+                let snapshot = scanFile(file.url).displaySnapshot
                 let hit = snapshot.map { snapshot in
                     let limitId = snapshot.limitId ?? "--"
                     let event = snapshot.eventTimestamp?.description ?? "--"
@@ -126,12 +137,12 @@ final class QuotaReader {
                 break
             }
 
-            if let snapshot = scanTail(of: file.url) {
-                if snapshot.limitId == preferredLimitId {
-                    bestPreferred = newer(bestPreferred, snapshot)
-                } else {
-                    bestFallback = newer(bestFallback, snapshot)
-                }
+            let result = scanFile(file.url)
+            if let snapshot = result.preferred {
+                bestPreferred = newer(bestPreferred, snapshot)
+            }
+            if let snapshot = result.fallback {
+                bestFallback = newer(bestFallback, snapshot)
             }
         }
 
@@ -219,71 +230,84 @@ final class QuotaReader {
         return Array(candidates.sorted { $0.modifiedAt > $1.modifiedAt }.prefix(limit))
     }
 
-    private func scanTail(of url: URL) -> QuotaSnapshot? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    private func scanFile(_ url: URL) -> FileScanResult {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return FileScanResult(preferred: nil, fallback: nil)
+        }
         defer {
             try? handle.close()
         }
 
-        let maxBytes: UInt64 = 4 * 1024 * 1024
         let endOffset = (try? handle.seekToEnd()) ?? 0
-        var best: QuotaSnapshot?
+        var offset = endOffset
+        var carry = Data()
+        var preferred: QuotaSnapshot?
+        var fallback: QuotaSnapshot?
 
-        if endOffset <= maxBytes * 2 {
-            if let snapshot = scanRegion(handle: handle, url: url, offset: 0, length: endOffset) {
-                best = newer(best, snapshot)
+        while offset > 0 {
+            let length = min(scanChunkBytes, offset)
+            offset -= length
+
+            do {
+                try handle.seek(toOffset: offset)
+            } catch {
+                break
             }
-        } else {
-            if let snapshot = scanRegion(handle: handle, url: url, offset: endOffset - maxBytes, length: maxBytes) {
-                best = newer(best, snapshot)
-            }
 
-            // Current active Codex session files can grow large while the most recent
-            // rate-limit event remains near the beginning of the JSONL file.
-            if let snapshot = scanRegion(handle: handle, url: url, offset: 0, length: maxBytes) {
-                best = newer(best, snapshot)
-            }
-        }
+            var chunk = handle.readData(ofLength: Int(length))
+            chunk.append(carry)
 
-        return best
-    }
-
-    private func scanRegion(handle: FileHandle, url: URL, offset: UInt64, length: UInt64) -> QuotaSnapshot? {
-        do {
-            try handle.seek(toOffset: offset)
-        } catch {
-            return nil
-        }
-
-        let data = handle.readData(ofLength: Int(length))
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        var best: QuotaSnapshot?
-
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
-            guard line.contains("\"rate_limits\"") else { continue }
-            guard let lineData = String(line).data(using: .utf8) else { continue }
-            guard
-                let object = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                let rateLimits = rateLimitsDictionary(in: object)
-            else {
+            let parts = chunk.split(separator: 0x0A, omittingEmptySubsequences: false)
+            guard !parts.isEmpty else {
+                carry = chunk
                 continue
             }
 
-            let snapshot = QuotaSnapshot(
-                eventTimestamp: parseDate(object["timestamp"]),
-                filePath: url.path,
-                limitId: rateLimits["limit_id"] as? String,
-                limitName: rateLimits["limit_name"] as? String,
-                planType: rateLimits["plan_type"] as? String,
-                primary: parseWindow(rateLimits["primary"]),
-                secondary: parseWindow(rateLimits["secondary"]),
-                credits: parseCredits(rateLimits["credits"])
-            )
+            let firstCompleteIndex = offset > 0 ? 1 : 0
+            carry = offset > 0 ? Data(parts[0]) : Data()
 
-            best = newer(best, snapshot)
+            guard parts.count > firstCompleteIndex else {
+                continue
+            }
+
+            for part in parts[firstCompleteIndex...].reversed() {
+                guard !part.isEmpty else { continue }
+                let lineData = Data(part)
+                guard lineData.range(of: rateLimitsNeedle) != nil else { continue }
+                guard let snapshot = parseSnapshot(from: lineData, url: url) else { continue }
+
+                if snapshot.limitId == preferredLimitId {
+                    preferred = snapshot
+                    return FileScanResult(preferred: preferred, fallback: fallback)
+                }
+
+                if fallback == nil {
+                    fallback = snapshot
+                }
+            }
         }
 
-        return best
+        return FileScanResult(preferred: preferred, fallback: fallback)
+    }
+
+    private func parseSnapshot(from lineData: Data, url: URL) -> QuotaSnapshot? {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+            let rateLimits = rateLimitsDictionary(in: object)
+        else {
+            return nil
+        }
+
+        return QuotaSnapshot(
+            eventTimestamp: parseDate(object["timestamp"]),
+            filePath: url.path,
+            limitId: rateLimits["limit_id"] as? String,
+            limitName: rateLimits["limit_name"] as? String,
+            planType: rateLimits["plan_type"] as? String,
+            primary: parseWindow(rateLimits["primary"]),
+            secondary: parseWindow(rateLimits["secondary"]),
+            credits: parseCredits(rateLimits["credits"])
+        )
     }
 
     private func rateLimitsDictionary(in object: [String: Any]) -> [String: Any]? {
