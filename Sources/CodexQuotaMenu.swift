@@ -628,6 +628,7 @@ final class QuotaStatusView: NSView {
         (topLabel, topValue) = splitRow(top, fallbackLabel: "5h")
         (bottomLabel, bottomValue) = splitRow(bottom, fallbackLabel: "w")
         needsDisplay = true
+        display()
     }
 
     override func mouseDown(with event: NSEvent) {
