@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import Foundation
 
 struct LimitWindow: Codable, Equatable {
@@ -73,6 +74,13 @@ final class QuotaReader {
 
         isoFormatter = ISO8601DateFormatter()
         isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    }
+
+    var watchRoots: [URL] {
+        [
+            codexHome.appendingPathComponent("sessions", isDirectory: true),
+            codexHome.appendingPathComponent("archived_sessions", isDirectory: true),
+        ]
     }
 
     func latestSnapshot() -> QuotaSnapshot? {
@@ -802,6 +810,117 @@ final class QuotaSummaryMenuView: NSView {
     }
 }
 
+final class SessionChangeWatcher {
+    private let paths: [String]
+    private let onChange: () -> Void
+    private let queue = DispatchQueue(label: "local.codex-quota-menubar.session-watch", qos: .utility)
+    private let debounceInterval: TimeInterval = 0.4
+    private var stream: FSEventStreamRef?
+    private var debounceWorkItem: DispatchWorkItem?
+
+    init(roots: [URL], onChange: @escaping () -> Void) {
+        paths = roots.compactMap { root in
+            guard
+                let values = try? root.resourceValues(forKeys: [.isDirectoryKey]),
+                values.isDirectory == true
+            else {
+                return nil
+            }
+
+            return root.path
+        }
+        self.onChange = onChange
+    }
+
+    func start() {
+        guard stream == nil, !paths.isEmpty else { return }
+
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+
+        let callback: FSEventStreamCallback = { _, info, count, eventPaths, eventFlags, _ in
+            guard let info else { return }
+            let watcher = Unmanaged<SessionChangeWatcher>.fromOpaque(info).takeUnretainedValue()
+            watcher.handleEvents(count: count, eventPaths: eventPaths, eventFlags: eventFlags)
+        }
+
+        let flags = FSEventStreamCreateFlags(
+            kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes
+        )
+
+        guard let stream = FSEventStreamCreate(
+            kCFAllocatorDefault,
+            callback,
+            &context,
+            paths as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            debounceInterval,
+            flags
+        ) else {
+            return
+        }
+
+        self.stream = stream
+        FSEventStreamSetDispatchQueue(stream, queue)
+        FSEventStreamStart(stream)
+    }
+
+    func stop() {
+        debounceWorkItem?.cancel()
+        debounceWorkItem = nil
+
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        self.stream = nil
+    }
+
+    deinit {
+        stop()
+    }
+
+    private func handleEvents(
+        count: Int,
+        eventPaths: UnsafeMutableRawPointer,
+        eventFlags: UnsafePointer<FSEventStreamEventFlags>
+    ) {
+        let changedPaths = unsafeBitCast(eventPaths, to: NSArray.self) as? [String] ?? []
+
+        for index in 0..<min(count, changedPaths.count) {
+            let path = changedPaths[index]
+            let flags = eventFlags[index]
+            let isFile = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile)) != 0
+            let isDirectory = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir)) != 0
+
+            if isFile, path.hasSuffix(".jsonl") {
+                scheduleChange()
+                return
+            }
+
+            if isDirectory {
+                scheduleChange()
+                return
+            }
+        }
+    }
+
+    private func scheduleChange() {
+        debounceWorkItem?.cancel()
+
+        let item = DispatchWorkItem { [onChange] in
+            onChange()
+        }
+        debounceWorkItem = item
+        queue.asyncAfter(deadline: .now() + debounceInterval, execute: item)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let reader = QuotaReader()
     private let cache = SnapshotCache()
@@ -810,9 +929,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let refreshQueue = DispatchQueue(label: "local.codex-quota-menubar.refresh", qos: .utility)
     private var statusItem: NSStatusItem?
     private var statusView: QuotaStatusView?
-    private var timer: Timer?
+    private var refreshTimer: DispatchSourceTimer?
+    private var sessionChangeWatcher: SessionChangeWatcher?
     private var currentSnapshot: QuotaSnapshot?
     private var isRefreshInFlight = false
+    private var needsRefreshAfterInFlight = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -825,10 +946,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.view = view
         applySnapshot(cache.load())
         requestRefresh()
+        startRefreshTimer()
+        startSessionChangeWatcher()
+    }
 
-        timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            self?.requestRefresh()
+    private func startRefreshTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: refreshQueue)
+        timer.schedule(deadline: .now() + refreshInterval, repeating: refreshInterval)
+        timer.setEventHandler { [weak self] in
+            DispatchQueue.main.async {
+                self?.requestRefresh()
+            }
         }
+        timer.resume()
+        refreshTimer = timer
+    }
+
+    private func startSessionChangeWatcher() {
+        sessionChangeWatcher = SessionChangeWatcher(roots: reader.watchRoots) { [weak self] in
+            DispatchQueue.main.async {
+                self?.requestRefresh()
+            }
+        }
+        sessionChangeWatcher?.start()
     }
 
     @objc private func refreshFromMenu() {
@@ -845,8 +985,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func requestRefresh() {
-        guard !isRefreshInFlight else { return }
+        guard !isRefreshInFlight else {
+            needsRefreshAfterInFlight = true
+            return
+        }
+
         isRefreshInFlight = true
+        needsRefreshAfterInFlight = false
         let previousSnapshot = currentSnapshot
 
         refreshQueue.async { [weak self] in
@@ -866,6 +1011,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 } else if self.currentSnapshot == nil {
                     self.applySnapshot(nil)
+                }
+
+                if self.needsRefreshAfterInFlight {
+                    self.requestRefresh()
                 }
             }
         }

@@ -17,7 +17,8 @@ swiftc -O \
   -Xcc -fmodules-cache-path="${MODULE_CACHE_DIR}" \
   "${ROOT_DIR}/Sources/CodexQuotaMenu.swift" \
   -o "${MACOS_DIR}/CodexQuotaMenu" \
-  -framework AppKit
+  -framework AppKit \
+  -framework CoreServices
 
 chmod +x "${MACOS_DIR}/CodexQuotaMenu"
 plutil -lint "${APP_DIR}/Contents/Info.plist"
